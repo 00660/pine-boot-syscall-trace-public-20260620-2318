@@ -1,0 +1,12 @@
+{
+  "name": "pine-internal-unpack-panel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local ADB web panel for authorized Redmi 7A internal APK unpacking tests.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

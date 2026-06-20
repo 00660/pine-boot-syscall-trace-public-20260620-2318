@@ -1,0 +1,149 @@
+name: Build pine internal unpack hook boot
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      boot_source_url:
+        description: Direct URL to the matching pine boot.img or ROM zip.
+        required: false
+      kernel_repo:
+        description: Optional pine kernel repo override.
+        required: false
+        default: https://github.com/hsx02/kernel_xiaomi_sdm439.git
+      kernel_ref:
+        description: Optional pine kernel ref override.
+        required: false
+        default: a12/main
+
+permissions:
+  contents: read
+
+jobs:
+  build-pine-unpack-hook:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout build inputs
+        uses: actions/checkout@v4
+
+      - name: Resolve pine boot source
+        env:
+          INPUT_BOOT_URL: ${{ inputs.boot_source_url }}
+          PINE_BOOT_SOURCE_URL: ${{ vars.PINE_BOOT_SOURCE_URL }}
+        run: |
+          set -euo pipefail
+          BOOT_URL="${INPUT_BOOT_URL:-$PINE_BOOT_SOURCE_URL}"
+          if [ -z "$BOOT_URL" ]; then
+            echo "Missing boot image URL."
+            echo "Set repository variable PINE_BOOT_SOURCE_URL or pass workflow_dispatch boot_source_url."
+            exit 1
+          fi
+          echo "BOOT_URL=$BOOT_URL" >> "$GITHUB_ENV"
+
+      - name: Install build and boot tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl file rsync unzip zip
+
+      - name: Download matching pine boot image
+        run: |
+          set -euo pipefail
+          mkdir -p devices/pine/base
+          TMP_BOOT_SOURCE="$(mktemp)"
+          curl -L --fail --retry 5 --retry-delay 5 \
+            -o "$TMP_BOOT_SOURCE" \
+            "$BOOT_URL"
+          if unzip -tqq "$TMP_BOOT_SOURCE" >/dev/null 2>&1; then
+            BOOT_ENTRY="$(unzip -Z1 "$TMP_BOOT_SOURCE" | grep -E '(^|/)boot[.]img$' | head -n 1 || true)"
+            if [ -z "$BOOT_ENTRY" ]; then
+              echo "No boot.img found inside boot source zip."
+              unzip -Z1 "$TMP_BOOT_SOURCE" | head -n 80
+              exit 1
+            fi
+            unzip -p "$TMP_BOOT_SOURCE" "$BOOT_ENTRY" > devices/pine/base/boot-current.img
+          else
+            cp -f "$TMP_BOOT_SOURCE" devices/pine/base/boot-current.img
+          fi
+          file devices/pine/base/boot-current.img
+          sha256sum devices/pine/base/boot-current.img
+
+      - name: Build Docker plus unpack hook kernel
+        env:
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          KERNEL_REF: ${{ inputs.kernel_ref }}
+        run: |
+          bash devices/pine/scripts/build-pine-unpack-kernel.sh
+
+      - name: Repack pine internal test boot
+        run: |
+          bash scripts/repack-boot.sh \
+            devices/pine/base/boot-current.img \
+            devices/pine/artifacts/Image.gz-dtb \
+            devices/pine/artifacts/boot-pine-unpack-hook.img
+
+      - name: Validate hook config
+        run: |
+          set -euo pipefail
+          CONFIG=devices/pine/artifacts/config-docker-final
+          grep -E '^(CONFIG_|# CONFIG_)(BPF_JIT|KPROBES|KPROBE_EVENTS|KPROBE_EVENT|UPROBES|UPROBE_EVENTS|UPROBE_EVENT|PERF_EVENTS|TRACEPOINTS|FTRACE|TRACEFS_FS|DEBUG_FS)' "$CONFIG" || true
+          grep -q '^CONFIG_KPROBES=y$' "$CONFIG"
+          grep -q '^CONFIG_BPF_SYSCALL=y$' "$CONFIG"
+          grep -q '^CONFIG_BPF_JIT=y$' "$CONFIG"
+          grep -q '^CONFIG_PERF_EVENTS=y$' "$CONFIG"
+          grep -q '^CONFIG_TRACEPOINTS=y$' "$CONFIG"
+          grep -q 'pine-syscall-trace.patch' devices/pine/artifacts/applied-kernel-patches.txt
+          grep -q '^# CONFIG_FHANDLE is not set$' "$CONFIG"
+          grep -q '^# CONFIG_USER_NS is not set$' "$CONFIG"
+          grep -Eq '^CONFIG_(KPROBE_EVENTS|KPROBE_EVENT)=y$' "$CONFIG" || echo "::warning::Kprobe event config not enabled by this 4.9 tree"
+          grep -Eq '^CONFIG_(UPROBES|UPROBE_EVENTS|UPROBE_EVENT)=y$' "$CONFIG" || echo "::warning::Uprobe support not enabled by this 4.9 tree; ROM ART patch remains primary"
+
+      - name: Package internal panel
+        run: |
+          set -euo pipefail
+          mkdir -p devices/pine/artifacts/pine-unpack-panel
+          rsync -a devices/pine/unpack-system/ devices/pine/artifacts/pine-unpack-panel/
+          cp -f devices/pine/UNPACK-HOOK-HANDOFF.md devices/pine/artifacts/pine-unpack-panel/
+          (
+            cd devices/pine/artifacts
+            zip -r pine-internal-unpack-panel.zip pine-unpack-panel
+            sha256sum pine-internal-unpack-panel.zip > pine-internal-unpack-panel.zip.sha256
+          )
+
+      - name: Write build manifest
+        run: |
+          set -euo pipefail
+          {
+            echo "device=pine"
+            echo "purpose=internal-authorized-unpack-test"
+            echo "notice=仅用于内部授权测试，禁止用于非法目的。"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "github_sha=${GITHUB_SHA}"
+            echo "boot_source_url=${BOOT_URL}"
+            echo "upstream_repo=$(cat devices/pine/artifacts/upstream-repo)"
+            echo "upstream_ref=$(cat devices/pine/artifacts/upstream-ref)"
+            echo "upstream_commit=$(cat devices/pine/artifacts/upstream-commit)"
+            echo "kernel_release=$(cat devices/pine/artifacts/kernel-release)"
+            echo "boot_sha256=$(cut -d ' ' -f 1 devices/pine/artifacts/boot-pine-unpack-hook.img.sha256)"
+          } > devices/pine/artifacts/pine-unpack-hook-build-manifest.env
+
+      - name: Upload internal test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pine-internal-unpack-hook
+          retention-days: 7
+          path: |
+            devices/pine/artifacts/boot-pine-unpack-hook.img
+            devices/pine/artifacts/boot-pine-unpack-hook.img.sha256
+            devices/pine/artifacts/Image.gz-dtb
+            devices/pine/artifacts/config-docker-final
+            devices/pine/artifacts/applied-kernel-patches.txt
+            devices/pine/artifacts/kernel-release
+            devices/pine/artifacts/upstream-*
+            devices/pine/artifacts/pine-unpack-hook-build-manifest.env
+            devices/pine/artifacts/pine-internal-unpack-panel.zip
+            devices/pine/artifacts/pine-internal-unpack-panel.zip.sha256
+          if-no-files-found: error

@@ -1,0 +1,35 @@
+# Redmi 7A / pine Android 12 kernel 4.9 hook support fragment.
+#
+# This is intentionally separate from docker-required.fragment so the verified
+# Docker kernel baseline can stay untouched. Merge both fragments only for the
+# internal APK unpacking test build.
+#
+# Note: Linux 4.9 does not have the modern BPF ringbuf map used by newer
+# Android 13-17 eBPF dumpers. A pine-compatible dumper must use perf events,
+# tracefs uprobes, or an ART-side hook backend.
+
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_CGROUP_BPF=y
+CONFIG_NET_CLS_BPF=y
+CONFIG_BPF_JIT=y
+
+CONFIG_KALLSYMS=y
+CONFIG_PERF_EVENTS=y
+CONFIG_TRACEPOINTS=y
+CONFIG_RING_BUFFER=y
+CONFIG_FTRACE=y
+CONFIG_FTRACE_SYSCALLS=y
+CONFIG_FUNCTION_TRACER=y
+CONFIG_DYNAMIC_FTRACE=y
+
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_UPROBES=y
+CONFIG_UPROBE_EVENTS=y
+
+CONFIG_DEBUG_FS=y
+CONFIG_TRACEFS_FS=y
