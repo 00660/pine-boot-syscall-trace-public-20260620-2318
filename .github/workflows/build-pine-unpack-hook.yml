@@ -37,8 +37,13 @@ jobs:
           set -euo pipefail
           BOOT_URL="${INPUT_BOOT_URL:-$PINE_BOOT_SOURCE_URL}"
           if [ -z "$BOOT_URL" ]; then
-            echo "Missing boot image URL."
-            echo "Set repository variable PINE_BOOT_SOURCE_URL or pass workflow_dispatch boot_source_url."
+            if [ -s devices/pine/base/boot-current.img ]; then
+              echo "BOOT_URL=" >> "$GITHUB_ENV"
+              echo "Use committed devices/pine/base/boot-current.img"
+              exit 0
+            fi
+            echo "Missing boot image URL and committed devices/pine/base/boot-current.img." >&2
+            echo "Set repository variable PINE_BOOT_SOURCE_URL, pass workflow_dispatch boot_source_url, or commit a matching base boot." >&2
             exit 1
           fi
           echo "BOOT_URL=$BOOT_URL" >> "$GITHUB_ENV"
@@ -50,6 +55,7 @@ jobs:
             curl file rsync unzip zip
 
       - name: Download matching pine boot image
+        if: env.BOOT_URL != ''
         run: |
           set -euo pipefail
           mkdir -p devices/pine/base
