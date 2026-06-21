@@ -93,21 +93,49 @@ index dd413e3..c7f7d1c 100644
 +	return s && needle && strstr(s, needle);
 +}
 +
++static bool pine_policy_has_token(const char *s, const char *token)
++{
++	const char *p;
++	size_t len;
++	char before;
++	char after;
++
++	if (!s || !token)
++		return false;
++	len = strlen(token);
++	if (!len)
++		return false;
++
++	p = s;
++	while ((p = strstr(p, token)) != NULL) {
++		before = p == s ? ' ' : p[-1];
++		after = p[len];
++		if ((p == s || before == ' ' || before == ',' ||
++		     before == '|' || before == '+' || before == '\t') &&
++		    (!after || after == ' ' || after == ',' ||
++		     after == '|' || after == '+' || after == '\t' ||
++		     after == '\n'))
++			return true;
++		p += len;
++	}
++	return false;
++}
++
 +static int pine_syscall_trace_parse_policy(const char *s)
 +{
 +	int policy = 0;
 +
-+	if (!s || pine_str_has(s, "trace"))
++	if (!s || pine_policy_has_token(s, "trace"))
 +		return 0;
-+	if (pine_str_has(s, "hide") || pine_str_has(s, "strict"))
++	if (pine_policy_has_token(s, "hide") || pine_policy_has_token(s, "strict"))
 +		return PINE_POLICY_HIDE_ALL;
-+	if (pine_str_has(s, "root"))
++	if (pine_policy_has_token(s, "root"))
 +		policy |= PINE_POLICY_HIDE_ROOT;
-+	if (pine_str_has(s, "proc"))
++	if (pine_policy_has_token(s, "proc"))
 +		policy |= PINE_POLICY_HIDE_PROC;
-+	if (pine_str_has(s, "ptrace"))
++	if (pine_policy_has_token(s, "ptrace"))
 +		policy |= PINE_POLICY_PTRACE;
-+	if (pine_str_has(s, "native"))
++	if (pine_policy_has_token(s, "native"))
 +		policy |= PINE_POLICY_NATIVE;
 +	return policy;
 +}
