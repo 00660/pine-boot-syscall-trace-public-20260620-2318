@@ -1,5 +1,64 @@
+diff --git a/arch/arm64/kernel/entry.S b/arch/arm64/kernel/entry.S
+index f1086d623..fd1d7adc8 100644
+--- a/arch/arm64/kernel/entry.S
++++ b/arch/arm64/kernel/entry.S
+@@ -860,6 +860,7 @@ ENDPROC(cpu_switch_to)
+ ret_fast_syscall:
+ 	disable_irq				// disable interrupts
+ 	str	x0, [sp, #S_X0]			// returned x0
++ret_fast_syscall_saved:
+ 	ldr	x1, [tsk, #TSK_TI_FLAGS]	// re-check for syscall tracing
+ 	and	x2, x1, #_TIF_SYSCALL_WORK
+ 	cbnz	x2, ret_fast_syscall_trace
+@@ -867,6 +868,15 @@ ret_fast_syscall:
+ 	cbnz	x2, work_pending
+ 	enable_step_tsk x1, x2
+ 	kernel_exit 0
++ret_fast_syscall_pine:
++	str	x0, [sp, #S_X0]			// returned x0
++	mov	x0, sp
++	bl	pine_syscall_trace_exit_always
++	disable_irq				// disable interrupts
++	b	ret_fast_syscall_saved
++ret_fast_syscall_pine_skipped:
++	disable_irq				// disable interrupts
++	b	ret_fast_syscall_saved
+ ret_fast_syscall_trace:
+ 	enable_irq				// enable interrupts
+ 	b	__sys_trace_return_skipped	// we already saved x0
+@@ -920,19 +930,28 @@ el0_svc_naked:					// compat entry point
+ 	enable_dbg_and_irq
+ 	ct_user_exit 1
+ 
++	mov	x0, sp
++	bl	pine_syscall_trace_enter_always
++	cmp	w0, #-1				// skip the syscall?
++	b.eq	ret_fast_syscall_pine_skipped
++	uxtw	scno, w0			// syscall number (possibly new)
+ 	ldr	x16, [tsk, #TSK_TI_FLAGS]	// check for syscall hooks
+ 	tst	x16, #_TIF_SYSCALL_WORK
+ 	b.ne	__sys_trace
+ 	cmp     scno, sc_nr                     // check upper syscall limit
+ 	b.hs	ni_sys
+ 	mask_nospec64 scno, sc_nr, x19	// enforce bounds for syscall number
++	ldp	x0, x1, [sp]			// restore the syscall args
++	ldp	x2, x3, [sp, #S_X2]
++	ldp	x4, x5, [sp, #S_X4]
++	ldp	x6, x7, [sp, #S_X6]
+ 	ldr	x16, [stbl, scno, lsl #3]	// address in the syscall table
+ 	blr	x16				// call sys_* routine
+-	b	ret_fast_syscall
++	b	ret_fast_syscall_pine
+ ni_sys:
+ 	mov	x0, sp
+ 	bl	do_ni_syscall
+-	b	ret_fast_syscall
++	b	ret_fast_syscall_pine
+ ENDPROC(el0_svc)
+ 
+ 	/*
 diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
-index dd413e3d5..10d3b3d36 100644
+index dd413e3d5..c13ffd365 100644
 --- a/arch/arm64/kernel/ptrace.c
 +++ b/arch/arm64/kernel/ptrace.c
 @@ -22,6 +22,11 @@
@@ -949,7 +1008,7 @@ index dd413e3d5..10d3b3d36 100644
  	pr_info("pine_syscall_trace type=signal name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px a0=%lx a1=%lx a2=%lx a3=%lx comm=%s\n",
  		name, compat, task_pid_nr(current), task_tgid_nr(current),
  		from_kuid_munged(&init_user_ns, current_uid()),
-@@ -246,12 +1065,68 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+@@ -246,12 +1065,81 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  		a0, a1, a2, a3, current->comm);
  }
  
@@ -1008,6 +1067,19 @@ index dd413e3d5..10d3b3d36 100644
 +	}
 +}
 +
++asmlinkage int pine_syscall_trace_enter_always(struct pt_regs *regs)
++{
++	pine_syscall_trace_enter(regs);
++	if (regs->syscallno == ~0UL)
++		return -1;
++	return regs->syscallno;
++}
++
++asmlinkage void pine_syscall_trace_exit_always(struct pt_regs *regs)
++{
++	pine_syscall_trace_exit(regs);
++}
++
  static int pine_syscall_trace_proc_show(struct seq_file *m, void *v)
  {
  	seq_printf(m, "enabled=%d\n", READ_ONCE(pine_syscall_trace_enabled));
@@ -1019,7 +1091,7 @@ index dd413e3d5..10d3b3d36 100644
  	return 0;
  }
  
-@@ -264,8 +1139,9 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -264,8 +1152,9 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  					     const char __user *buf,
  					     size_t count, loff_t *ppos)
  {
@@ -1030,7 +1102,7 @@ index dd413e3d5..10d3b3d36 100644
  	int value;
  
  	if (count >= sizeof(cmd))
-@@ -279,27 +1155,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -279,27 +1168,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  		WRITE_ONCE(pine_syscall_trace_enabled, 0);
  		WRITE_ONCE(pine_syscall_trace_uid, -1);
  		WRITE_ONCE(pine_syscall_trace_tgid, -1);
@@ -1077,7 +1149,7 @@ index dd413e3d5..10d3b3d36 100644
  
  	return -EINVAL;
  }
-@@ -634,6 +1525,11 @@ static int ptrace_hbp_get_resource_info(unsigned int note_type, u32 *info)
+@@ -634,6 +1538,11 @@ static int ptrace_hbp_get_resource_info(unsigned int note_type, u32 *info)
  	u8 num;
  	u32 reg = 0;
  
@@ -1089,7 +1161,7 @@ index dd413e3d5..10d3b3d36 100644
  	switch (note_type) {
  	case NT_ARM_HW_BREAK:
  		num = hw_breakpoint_slots(TYPE_INST);
-@@ -660,6 +1556,11 @@ static int ptrace_hbp_get_ctrl(unsigned int note_type,
+@@ -660,6 +1569,11 @@ static int ptrace_hbp_get_ctrl(unsigned int note_type,
  {
  	struct perf_event *bp = ptrace_hbp_get_event(note_type, tsk, idx);
  
@@ -1101,7 +1173,7 @@ index dd413e3d5..10d3b3d36 100644
  	if (IS_ERR(bp))
  		return PTR_ERR(bp);
  
-@@ -674,6 +1575,11 @@ static int ptrace_hbp_get_addr(unsigned int note_type,
+@@ -674,6 +1588,11 @@ static int ptrace_hbp_get_addr(unsigned int note_type,
  {
  	struct perf_event *bp = ptrace_hbp_get_event(note_type, tsk, idx);
  
@@ -1113,7 +1185,7 @@ index dd413e3d5..10d3b3d36 100644
  	if (IS_ERR(bp))
  		return PTR_ERR(bp);
  
-@@ -703,6 +1609,9 @@ static int ptrace_hbp_set_ctrl(unsigned int note_type,
+@@ -703,6 +1622,9 @@ static int ptrace_hbp_set_ctrl(unsigned int note_type,
  	struct perf_event_attr attr;
  	struct arch_hw_breakpoint_ctrl ctrl;
  
@@ -1123,7 +1195,7 @@ index dd413e3d5..10d3b3d36 100644
  	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
  	if (IS_ERR(bp)) {
  		err = PTR_ERR(bp);
-@@ -727,6 +1636,9 @@ static int ptrace_hbp_set_addr(unsigned int note_type,
+@@ -727,6 +1649,9 @@ static int ptrace_hbp_set_addr(unsigned int note_type,
  	struct perf_event *bp;
  	struct perf_event_attr attr;
  
@@ -1133,7 +1205,16 @@ index dd413e3d5..10d3b3d36 100644
  	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
  	if (IS_ERR(bp)) {
  		err = PTR_ERR(bp);
-@@ -1646,6 +2558,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+@@ -1626,8 +2551,6 @@ static void tracehook_report_syscall(struct pt_regs *regs,
+ 
+ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+ {
+-	pine_syscall_trace_enter(regs);
+-
+ 	if (test_thread_flag(TIF_SYSCALL_TRACE))
+ 		tracehook_report_syscall(regs, PTRACE_SYSCALL_ENTER);
+ 
+@@ -1646,6 +2569,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
  
  asmlinkage void syscall_trace_exit(struct pt_regs *regs)
  {
