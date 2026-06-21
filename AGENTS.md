@@ -4,6 +4,7 @@
 
 - 后续所有 pine boot 构建产物必须先保持为 GitHub Actions 下载的 clean boot artifact。
 - 需要 root/Magisk 版本时，必须使用手机 `/sdcard/Download/` 目录中官方 Magisk APK 自带的修补程序进行修补。
+- 后续 boot 更新流程固定为：先把 clean boot 推送到手机 `/sdcard/Download/`，等待用户手动用手机官方 Magisk 修补；用户明确说“修补好了”后，才能校验最新 `magisk_patched-30700_*.img` 并刷写。
 - 不要手工拼接 Magisk ramdisk、不要自行改写 `skip_initramfs`/`want_initramfs`、不要自行 padding/truncate 成 64M 后当作修补结果交付。
 - 修补后的 boot 只以官方 Magisk 修补输出为准；交付或刷写前必须校验文件路径、大小、SHA256、目标设备属性 `device=pine`。
 
