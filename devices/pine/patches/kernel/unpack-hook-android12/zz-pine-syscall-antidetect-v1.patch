@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
-index dd413e3d5..d585160ab 100644
+index dd413e3d5..10d3b3d36 100644
 --- a/arch/arm64/kernel/ptrace.c
 +++ b/arch/arm64/kernel/ptrace.c
 @@ -22,6 +22,11 @@
@@ -22,7 +22,7 @@ index dd413e3d5..d585160ab 100644
  #include <linux/init.h>
  #include <linux/signal.h>
  #include <linux/uaccess.h>
-@@ -52,23 +58,80 @@
+@@ -52,23 +58,84 @@
  #define CREATE_TRACE_POINTS
  #include <trace/events/syscalls.h>
  
@@ -58,8 +58,12 @@ index dd413e3d5..d585160ab 100644
 +#define PINE_POLICY_PTRACE 0x4
 +#define PINE_POLICY_NATIVE 0x8
 +#define PINE_POLICY_PTE 0x10
++#define PINE_POLICY_GHOST 0x20
++#define PINE_POLICY_UXN_ENFORCE 0x40
 +#define PINE_POLICY_HIDE_ALL (PINE_POLICY_HIDE_ROOT | PINE_POLICY_HIDE_PROC | \
 +			      PINE_POLICY_PTRACE | PINE_POLICY_NATIVE)
++#define PINE_POLICY_STRICT_ALL (PINE_POLICY_HIDE_ALL | PINE_POLICY_PTE | \
++				PINE_POLICY_GHOST)
 +#define PINE_PATH_ROOT 0x1
 +#define PINE_PATH_HOOK 0x2
 +#define PINE_PATH_PROC 0x4
@@ -105,7 +109,7 @@ index dd413e3d5..d585160ab 100644
  
  static bool pine_syscall_trace_match_current(void)
  {
-@@ -112,10 +175,518 @@ static void pine_syscall_trace_copy_user(char *dst, size_t dst_len,
+@@ -112,10 +179,550 @@ static void pine_syscall_trace_copy_user(char *dst, size_t dst_len,
  	dst[dst_len - 1] = 0;
  }
  
@@ -154,7 +158,9 @@ index dd413e3d5..d585160ab 100644
 +
 +	if (!s || pine_policy_has_token(s, "trace"))
 +		return 0;
-+	if (pine_policy_has_token(s, "hide") || pine_policy_has_token(s, "strict"))
++	if (pine_policy_has_token(s, "strict"))
++		return PINE_POLICY_STRICT_ALL;
++	if (pine_policy_has_token(s, "hide"))
 +		return PINE_POLICY_HIDE_ALL;
 +	if (pine_policy_has_token(s, "root"))
 +		policy |= PINE_POLICY_HIDE_ROOT;
@@ -166,6 +172,11 @@ index dd413e3d5..d585160ab 100644
 +		policy |= PINE_POLICY_NATIVE;
 +	if (pine_policy_has_token(s, "pte") || pine_policy_has_token(s, "uxn"))
 +		policy |= PINE_POLICY_PTE;
++	if (pine_policy_has_token(s, "ghost"))
++		policy |= PINE_POLICY_GHOST;
++	if (pine_policy_has_token(s, "uxn_enforce") ||
++	    pine_policy_has_token(s, "pte_enforce"))
++		policy |= PINE_POLICY_UXN_ENFORCE;
 +	return policy;
 +}
 +
@@ -281,18 +292,37 @@ index dd413e3d5..d585160ab 100644
 +	       strnstr(line, "dobby", len);
 +}
 +
++static bool pine_syscall_trace_line_has_ghost_mapping(const char *line, size_t len)
++{
++	if (!strnstr(line, " r-xp ", len) &&
++	    !strnstr(line, " rwxp ", len) &&
++	    !strnstr(line, " --xp ", len))
++		return false;
++
++	return strnstr(line, "memfd:", len) ||
++	       strnstr(line, "(deleted)", len) ||
++	       strnstr(line, "/dev/ashmem", len) ||
++	       strnstr(line, "jit-cache", len) ||
++	       strnstr(line, "dalvik-jit-code-cache", len) ||
++	       strnstr(line, "[anon:", len) ||
++	       strnstr(line, " rwxp ", len);
++}
++
 +static bool pine_syscall_trace_scrub_secret_lines(char *buf, size_t len)
 +{
 +	char *line = buf;
 +	char *end = buf + len;
 +	char *line_end;
 +	bool changed = false;
++	bool ghost = READ_ONCE(pine_syscall_trace_policy) & PINE_POLICY_GHOST;
 +
 +	while (line < end) {
 +		line_end = line;
 +		while (line_end < end && *line_end != '\n')
 +			line_end++;
-+		if (pine_syscall_trace_line_has_secret(line, line_end - line)) {
++		if (pine_syscall_trace_line_has_secret(line, line_end - line) ||
++		    (ghost && pine_syscall_trace_line_has_ghost_mapping(
++			      line, line_end - line))) {
 +			memset(line, ' ', line_end - line);
 +			changed = true;
 +		}
@@ -411,6 +441,12 @@ index dd413e3d5..d585160ab 100644
 +{
 +	return (!compat && nr == __NR_ptrace) ||
 +	       (compat && nr == PINE_COMPAT_NR_PTRACE);
++}
++
++static bool pine_syscall_trace_hwbp_strict_enabled(void)
++{
++	return pine_syscall_trace_match_current() &&
++	       (READ_ONCE(pine_syscall_trace_policy) & PINE_POLICY_PTRACE);
 +}
 +
 +static bool pine_syscall_trace_is_native_probe_nr(int nr, bool compat)
@@ -624,7 +660,7 @@ index dd413e3d5..d585160ab 100644
  		case PINE_COMPAT_NR_OPENAT:
  			*name = "openat";
  			return true;
-@@ -125,6 +696,30 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
+@@ -125,6 +732,30 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
  		case PINE_COMPAT_NR_FACCESSAT:
  			*name = "faccessat";
  			return true;
@@ -655,7 +691,7 @@ index dd413e3d5..d585160ab 100644
  		case PINE_COMPAT_NR_KILL:
  			*name = "kill";
  			return true;
-@@ -158,12 +753,69 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
+@@ -158,12 +789,69 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
  	case __NR_openat:
  		*name = "openat";
  		return true;
@@ -725,7 +761,7 @@ index dd413e3d5..d585160ab 100644
  	case __NR_kill:
  		*name = "kill";
  		return true;
-@@ -193,12 +845,62 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
+@@ -193,12 +881,62 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
  	}
  }
  
@@ -788,7 +824,7 @@ index dd413e3d5..d585160ab 100644
  	unsigned long a0 = regs->orig_x0;
  	unsigned long a1 = regs->regs[1];
  	unsigned long a2 = regs->regs[2];
-@@ -210,12 +912,58 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+@@ -210,12 +948,69 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  	if (!pine_syscall_trace_name(nr, compat, &name))
  		return;
  
@@ -835,6 +871,17 @@ index dd413e3d5..d585160ab 100644
  		unsigned long prot = a2;
  		if (!(prot & PINE_PROT_EXEC))
  			return;
++		if (READ_ONCE(pine_syscall_trace_policy) &
++		    PINE_POLICY_UXN_ENFORCE) {
++			regs->regs[2] = prot & ~PINE_PROT_EXEC;
++			pr_info("pine_syscall_trace type=uxn_enforce name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px addr=%lx len=%lx old_prot=%lx new_prot=%lx flags=%lx policy=%x comm=%s\n",
++				name, compat, task_pid_nr(current), task_tgid_nr(current),
++				from_kuid_munged(&init_user_ns, current_uid()),
++				(void *)regs->pc, (void *)regs->regs[30],
++				a0, a1, prot, regs->regs[2], a3,
++				READ_ONCE(pine_syscall_trace_policy), current->comm);
++			return;
++		}
 +		if (READ_ONCE(pine_syscall_trace_policy) & PINE_POLICY_PTE) {
 +			pr_info("pine_syscall_trace type=pte_probe name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px addr=%lx len=%lx prot=%lx flags=%lx policy=%x comm=%s\n",
 +				name, compat, task_pid_nr(current), task_tgid_nr(current),
@@ -847,7 +894,7 @@ index dd413e3d5..d585160ab 100644
  		pr_info("pine_syscall_trace type=mem name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px addr=%lx len=%lx prot=%lx flags=%lx comm=%s\n",
  			name, compat, task_pid_nr(current), task_tgid_nr(current),
  			from_kuid_munged(&init_user_ns, current_uid()),
-@@ -224,21 +972,45 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+@@ -224,21 +1019,45 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  		return;
  	}
  
@@ -902,7 +949,7 @@ index dd413e3d5..d585160ab 100644
  	pr_info("pine_syscall_trace type=signal name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px a0=%lx a1=%lx a2=%lx a3=%lx comm=%s\n",
  		name, compat, task_pid_nr(current), task_tgid_nr(current),
  		from_kuid_munged(&init_user_ns, current_uid()),
-@@ -246,12 +1018,68 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+@@ -246,12 +1065,68 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  		a0, a1, a2, a3, current->comm);
  }
  
@@ -968,11 +1015,11 @@ index dd413e3d5..d585160ab 100644
  	seq_printf(m, "tgid=%d\n", READ_ONCE(pine_syscall_trace_tgid));
 -	seq_puts(m, "commands: 0 | all | uid <app_uid> | pid <tgid>\n");
 +	seq_printf(m, "policy=%d\n", READ_ONCE(pine_syscall_trace_policy));
-+	seq_puts(m, "commands: 0 | all [trace|hide|root|proc|ptrace|native|pte|uxn] | uid <app_uid> [mode] | pid <tgid> [mode] | mode <mode>\n");
++	seq_puts(m, "commands: 0 | all [trace|hide|strict|root|proc|ptrace|native|pte|uxn|ghost|uxn_enforce] | uid <app_uid> [mode] | pid <tgid> [mode] | mode <mode>\n");
  	return 0;
  }
  
-@@ -264,8 +1092,9 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -264,8 +1139,9 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  					     const char __user *buf,
  					     size_t count, loff_t *ppos)
  {
@@ -983,7 +1030,7 @@ index dd413e3d5..d585160ab 100644
  	int value;
  
  	if (count >= sizeof(cmd))
-@@ -279,27 +1108,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -279,27 +1155,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  		WRITE_ONCE(pine_syscall_trace_enabled, 0);
  		WRITE_ONCE(pine_syscall_trace_uid, -1);
  		WRITE_ONCE(pine_syscall_trace_tgid, -1);
@@ -1030,7 +1077,63 @@ index dd413e3d5..d585160ab 100644
  
  	return -EINVAL;
  }
-@@ -1646,6 +2490,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+@@ -634,6 +1525,11 @@ static int ptrace_hbp_get_resource_info(unsigned int note_type, u32 *info)
+ 	u8 num;
+ 	u32 reg = 0;
+ 
++	if (pine_syscall_trace_hwbp_strict_enabled()) {
++		*info = debug_monitors_arch() << 8;
++		return 0;
++	}
++
+ 	switch (note_type) {
+ 	case NT_ARM_HW_BREAK:
+ 		num = hw_breakpoint_slots(TYPE_INST);
+@@ -660,6 +1556,11 @@ static int ptrace_hbp_get_ctrl(unsigned int note_type,
+ {
+ 	struct perf_event *bp = ptrace_hbp_get_event(note_type, tsk, idx);
+ 
++	if (pine_syscall_trace_hwbp_strict_enabled()) {
++		*ctrl = 0;
++		return 0;
++	}
++
+ 	if (IS_ERR(bp))
+ 		return PTR_ERR(bp);
+ 
+@@ -674,6 +1575,11 @@ static int ptrace_hbp_get_addr(unsigned int note_type,
+ {
+ 	struct perf_event *bp = ptrace_hbp_get_event(note_type, tsk, idx);
+ 
++	if (pine_syscall_trace_hwbp_strict_enabled()) {
++		*addr = 0;
++		return 0;
++	}
++
+ 	if (IS_ERR(bp))
+ 		return PTR_ERR(bp);
+ 
+@@ -703,6 +1609,9 @@ static int ptrace_hbp_set_ctrl(unsigned int note_type,
+ 	struct perf_event_attr attr;
+ 	struct arch_hw_breakpoint_ctrl ctrl;
+ 
++	if (pine_syscall_trace_hwbp_strict_enabled())
++		return 0;
++
+ 	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
+ 	if (IS_ERR(bp)) {
+ 		err = PTR_ERR(bp);
+@@ -727,6 +1636,9 @@ static int ptrace_hbp_set_addr(unsigned int note_type,
+ 	struct perf_event *bp;
+ 	struct perf_event_attr attr;
+ 
++	if (pine_syscall_trace_hwbp_strict_enabled())
++		return 0;
++
+ 	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
+ 	if (IS_ERR(bp)) {
+ 		err = PTR_ERR(bp);
+@@ -1646,6 +2558,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
  
  asmlinkage void syscall_trace_exit(struct pt_regs *regs)
  {
