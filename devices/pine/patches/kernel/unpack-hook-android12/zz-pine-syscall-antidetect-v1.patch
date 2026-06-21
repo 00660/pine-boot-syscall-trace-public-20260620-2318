@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
-index dd413e3d5..ddd3e67f0 100644
+index dd413e3d5..d585160ab 100644
 --- a/arch/arm64/kernel/ptrace.c
 +++ b/arch/arm64/kernel/ptrace.c
 @@ -22,6 +22,11 @@
@@ -22,7 +22,7 @@ index dd413e3d5..ddd3e67f0 100644
  #include <linux/init.h>
  #include <linux/signal.h>
  #include <linux/uaccess.h>
-@@ -52,23 +58,79 @@
+@@ -52,23 +58,80 @@
  #define CREATE_TRACE_POINTS
  #include <trace/events/syscalls.h>
  
@@ -57,6 +57,7 @@ index dd413e3d5..ddd3e67f0 100644
 +#define PINE_POLICY_HIDE_PROC 0x2
 +#define PINE_POLICY_PTRACE 0x4
 +#define PINE_POLICY_NATIVE 0x8
++#define PINE_POLICY_PTE 0x10
 +#define PINE_POLICY_HIDE_ALL (PINE_POLICY_HIDE_ROOT | PINE_POLICY_HIDE_PROC | \
 +			      PINE_POLICY_PTRACE | PINE_POLICY_NATIVE)
 +#define PINE_PATH_ROOT 0x1
@@ -104,7 +105,7 @@ index dd413e3d5..ddd3e67f0 100644
  
  static bool pine_syscall_trace_match_current(void)
  {
-@@ -112,10 +174,516 @@ static void pine_syscall_trace_copy_user(char *dst, size_t dst_len,
+@@ -112,10 +175,518 @@ static void pine_syscall_trace_copy_user(char *dst, size_t dst_len,
  	dst[dst_len - 1] = 0;
  }
  
@@ -163,6 +164,8 @@ index dd413e3d5..ddd3e67f0 100644
 +		policy |= PINE_POLICY_PTRACE;
 +	if (pine_policy_has_token(s, "native"))
 +		policy |= PINE_POLICY_NATIVE;
++	if (pine_policy_has_token(s, "pte") || pine_policy_has_token(s, "uxn"))
++		policy |= PINE_POLICY_PTE;
 +	return policy;
 +}
 +
@@ -621,7 +624,7 @@ index dd413e3d5..ddd3e67f0 100644
  		case PINE_COMPAT_NR_OPENAT:
  			*name = "openat";
  			return true;
-@@ -125,6 +693,30 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
+@@ -125,6 +696,30 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
  		case PINE_COMPAT_NR_FACCESSAT:
  			*name = "faccessat";
  			return true;
@@ -652,7 +655,7 @@ index dd413e3d5..ddd3e67f0 100644
  		case PINE_COMPAT_NR_KILL:
  			*name = "kill";
  			return true;
-@@ -158,12 +750,69 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
+@@ -158,12 +753,69 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
  	case __NR_openat:
  		*name = "openat";
  		return true;
@@ -722,7 +725,7 @@ index dd413e3d5..ddd3e67f0 100644
  	case __NR_kill:
  		*name = "kill";
  		return true;
-@@ -193,12 +842,62 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
+@@ -193,12 +845,62 @@ static bool pine_syscall_trace_name(int nr, bool compat, const char **name)
  	}
  }
  
@@ -785,7 +788,7 @@ index dd413e3d5..ddd3e67f0 100644
  	unsigned long a0 = regs->orig_x0;
  	unsigned long a1 = regs->regs[1];
  	unsigned long a2 = regs->regs[2];
-@@ -210,6 +909,43 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+@@ -210,12 +912,58 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  	if (!pine_syscall_trace_name(nr, compat, &name))
  		return;
  
@@ -829,7 +832,22 @@ index dd413e3d5..ddd3e67f0 100644
  	if ((!compat && (nr == __NR_mmap || nr == __NR_mprotect)) ||
  	    (compat && (nr == PINE_COMPAT_NR_MMAP2 ||
  			nr == PINE_COMPAT_NR_MPROTECT))) {
-@@ -224,21 +960,45 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+ 		unsigned long prot = a2;
+ 		if (!(prot & PINE_PROT_EXEC))
+ 			return;
++		if (READ_ONCE(pine_syscall_trace_policy) & PINE_POLICY_PTE) {
++			pr_info("pine_syscall_trace type=pte_probe name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px addr=%lx len=%lx prot=%lx flags=%lx policy=%x comm=%s\n",
++				name, compat, task_pid_nr(current), task_tgid_nr(current),
++				from_kuid_munged(&init_user_ns, current_uid()),
++				(void *)regs->pc, (void *)regs->regs[30],
++				a0, a1, prot, a3,
++				READ_ONCE(pine_syscall_trace_policy), current->comm);
++			return;
++		}
+ 		pr_info("pine_syscall_trace type=mem name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px addr=%lx len=%lx prot=%lx flags=%lx comm=%s\n",
+ 			name, compat, task_pid_nr(current), task_tgid_nr(current),
+ 			from_kuid_munged(&init_user_ns, current_uid()),
+@@ -224,21 +972,45 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  		return;
  	}
  
@@ -884,7 +902,7 @@ index dd413e3d5..ddd3e67f0 100644
  	pr_info("pine_syscall_trace type=signal name=%s compat=%d pid=%d tgid=%d uid=%u pc=%px lr=%px a0=%lx a1=%lx a2=%lx a3=%lx comm=%s\n",
  		name, compat, task_pid_nr(current), task_tgid_nr(current),
  		from_kuid_munged(&init_user_ns, current_uid()),
-@@ -246,12 +1006,68 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
+@@ -246,12 +1018,68 @@ static void pine_syscall_trace_enter(struct pt_regs *regs)
  		a0, a1, a2, a3, current->comm);
  }
  
@@ -950,11 +968,11 @@ index dd413e3d5..ddd3e67f0 100644
  	seq_printf(m, "tgid=%d\n", READ_ONCE(pine_syscall_trace_tgid));
 -	seq_puts(m, "commands: 0 | all | uid <app_uid> | pid <tgid>\n");
 +	seq_printf(m, "policy=%d\n", READ_ONCE(pine_syscall_trace_policy));
-+	seq_puts(m, "commands: 0 | all [trace|hide|root|proc|ptrace|native] | uid <app_uid> [mode] | pid <tgid> [mode] | mode <mode>\n");
++	seq_puts(m, "commands: 0 | all [trace|hide|root|proc|ptrace|native|pte|uxn] | uid <app_uid> [mode] | pid <tgid> [mode] | mode <mode>\n");
  	return 0;
  }
  
-@@ -264,8 +1080,9 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -264,8 +1092,9 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  					     const char __user *buf,
  					     size_t count, loff_t *ppos)
  {
@@ -965,7 +983,7 @@ index dd413e3d5..ddd3e67f0 100644
  	int value;
  
  	if (count >= sizeof(cmd))
-@@ -279,27 +1096,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -279,27 +1108,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  		WRITE_ONCE(pine_syscall_trace_enabled, 0);
  		WRITE_ONCE(pine_syscall_trace_uid, -1);
  		WRITE_ONCE(pine_syscall_trace_tgid, -1);
@@ -1012,7 +1030,7 @@ index dd413e3d5..ddd3e67f0 100644
  
  	return -EINVAL;
  }
-@@ -1646,6 +2478,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+@@ -1646,6 +2490,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
  
  asmlinkage void syscall_trace_exit(struct pt_regs *regs)
  {
