@@ -55,7 +55,11 @@ enable_native_syscall_trace() {
   [ -w /proc/pine_syscall_trace ] || return 0
   app_uid="$(detect_app_uid)"
   [ -n "$app_uid" ] || return 0
-  echo "uid $app_uid" >/proc/pine_syscall_trace 2>/dev/null || true
+  if grep -q '^policy=' /proc/pine_syscall_trace 2>/dev/null; then
+    echo "uid $app_uid hide" >/proc/pine_syscall_trace 2>/dev/null || true
+  else
+    echo "uid $app_uid" >/proc/pine_syscall_trace 2>/dev/null || true
+  fi
 }
 
 collect_native_syscall_trace() {
