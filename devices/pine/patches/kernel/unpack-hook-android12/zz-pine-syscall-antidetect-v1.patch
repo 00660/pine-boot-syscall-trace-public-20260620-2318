@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/kernel/entry.S b/arch/arm64/kernel/entry.S
-index f1086d623..fd1d7adc8 100644
+index f1086d6..ed34ab6 100644
 --- a/arch/arm64/kernel/entry.S
 +++ b/arch/arm64/kernel/entry.S
 @@ -860,6 +860,7 @@ ENDPROC(cpu_switch_to)
@@ -10,31 +10,29 @@ index f1086d623..fd1d7adc8 100644
  	ldr	x1, [tsk, #TSK_TI_FLAGS]	// re-check for syscall tracing
  	and	x2, x1, #_TIF_SYSCALL_WORK
  	cbnz	x2, ret_fast_syscall_trace
-@@ -867,6 +868,15 @@ ret_fast_syscall:
+@@ -867,6 +868,9 @@ ret_fast_syscall:
  	cbnz	x2, work_pending
  	enable_step_tsk x1, x2
  	kernel_exit 0
-+ret_fast_syscall_pine:
-+	str	x0, [sp, #S_X0]			// returned x0
-+	mov	x0, sp
-+	bl	pine_syscall_trace_exit_always
-+	disable_irq				// disable interrupts
-+	b	ret_fast_syscall_saved
 +ret_fast_syscall_pine_skipped:
 +	disable_irq				// disable interrupts
 +	b	ret_fast_syscall_saved
  ret_fast_syscall_trace:
  	enable_irq				// enable interrupts
  	b	__sys_trace_return_skipped	// we already saved x0
-@@ -920,19 +930,28 @@ el0_svc_naked:					// compat entry point
+@@ -920,12 +924,25 @@ el0_svc_naked:					// compat entry point
  	enable_dbg_and_irq
  	ct_user_exit 1
  
++	adr_l	x16, pine_syscall_trace_enabled
++	ldr	w16, [x16]
++	cbz	w16, 1f
 +	mov	x0, sp
 +	bl	pine_syscall_trace_enter_always
-+	cmp	w0, #-1				// skip the syscall?
++	cmp	x0, #-1				// skip the syscall?
 +	b.eq	ret_fast_syscall_pine_skipped
 +	uxtw	scno, w0			// syscall number (possibly new)
++1:
  	ldr	x16, [tsk, #TSK_TI_FLAGS]	// check for syscall hooks
  	tst	x16, #_TIF_SYSCALL_WORK
  	b.ne	__sys_trace
@@ -47,18 +45,9 @@ index f1086d623..fd1d7adc8 100644
 +	ldp	x6, x7, [sp, #S_X6]
  	ldr	x16, [stbl, scno, lsl #3]	// address in the syscall table
  	blr	x16				// call sys_* routine
--	b	ret_fast_syscall
-+	b	ret_fast_syscall_pine
- ni_sys:
- 	mov	x0, sp
- 	bl	do_ni_syscall
--	b	ret_fast_syscall
-+	b	ret_fast_syscall_pine
- ENDPROC(el0_svc)
- 
- 	/*
+ 	b	ret_fast_syscall
 diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
-index dd413e3d5..c13ffd365 100644
+index dd413e3..93bf291 100644
 --- a/arch/arm64/kernel/ptrace.c
 +++ b/arch/arm64/kernel/ptrace.c
 @@ -22,6 +22,11 @@
@@ -155,13 +144,14 @@ index dd413e3d5..c13ffd365 100644
 +	unsigned long iov_base;
 +	unsigned long iov_len;
 +};
-+
+ 
+-static int pine_syscall_trace_enabled;
 +struct pine_iovec32 {
 +	unsigned int iov_base;
 +	unsigned int iov_len;
 +};
- 
- static int pine_syscall_trace_enabled;
++
++int pine_syscall_trace_enabled;
  static int pine_syscall_trace_uid = -1;
  static int pine_syscall_trace_tgid = -1;
 +static int pine_syscall_trace_policy;
@@ -1067,7 +1057,7 @@ index dd413e3d5..c13ffd365 100644
 +	}
 +}
 +
-+asmlinkage int pine_syscall_trace_enter_always(struct pt_regs *regs)
++asmlinkage long pine_syscall_trace_enter_always(struct pt_regs *regs)
 +{
 +	pine_syscall_trace_enter(regs);
 +	if (regs->syscallno == ~0UL)
@@ -1102,7 +1092,7 @@ index dd413e3d5..c13ffd365 100644
  	int value;
  
  	if (count >= sizeof(cmd))
-@@ -279,27 +1168,42 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
+@@ -279,27 +1168,41 @@ static ssize_t pine_syscall_trace_proc_write(struct file *file,
  		WRITE_ONCE(pine_syscall_trace_enabled, 0);
  		WRITE_ONCE(pine_syscall_trace_uid, -1);
  		WRITE_ONCE(pine_syscall_trace_tgid, -1);
@@ -1113,8 +1103,7 @@ index dd413e3d5..c13ffd365 100644
 +	if (!strncmp(s, "all", 3)) {
  		WRITE_ONCE(pine_syscall_trace_uid, -1);
  		WRITE_ONCE(pine_syscall_trace_tgid, -1);
-+		WRITE_ONCE(pine_syscall_trace_policy,
-+			   pine_syscall_trace_parse_policy(s + 3));
++		WRITE_ONCE(pine_syscall_trace_policy, 0);
  		WRITE_ONCE(pine_syscall_trace_enabled, 2);
  		return count;
  	}
@@ -1149,7 +1138,7 @@ index dd413e3d5..c13ffd365 100644
  
  	return -EINVAL;
  }
-@@ -634,6 +1538,11 @@ static int ptrace_hbp_get_resource_info(unsigned int note_type, u32 *info)
+@@ -634,6 +1537,11 @@ static int ptrace_hbp_get_resource_info(unsigned int note_type, u32 *info)
  	u8 num;
  	u32 reg = 0;
  
@@ -1161,7 +1150,7 @@ index dd413e3d5..c13ffd365 100644
  	switch (note_type) {
  	case NT_ARM_HW_BREAK:
  		num = hw_breakpoint_slots(TYPE_INST);
-@@ -660,6 +1569,11 @@ static int ptrace_hbp_get_ctrl(unsigned int note_type,
+@@ -660,6 +1568,11 @@ static int ptrace_hbp_get_ctrl(unsigned int note_type,
  {
  	struct perf_event *bp = ptrace_hbp_get_event(note_type, tsk, idx);
  
@@ -1173,7 +1162,7 @@ index dd413e3d5..c13ffd365 100644
  	if (IS_ERR(bp))
  		return PTR_ERR(bp);
  
-@@ -674,6 +1588,11 @@ static int ptrace_hbp_get_addr(unsigned int note_type,
+@@ -674,6 +1587,11 @@ static int ptrace_hbp_get_addr(unsigned int note_type,
  {
  	struct perf_event *bp = ptrace_hbp_get_event(note_type, tsk, idx);
  
@@ -1185,7 +1174,7 @@ index dd413e3d5..c13ffd365 100644
  	if (IS_ERR(bp))
  		return PTR_ERR(bp);
  
-@@ -703,6 +1622,9 @@ static int ptrace_hbp_set_ctrl(unsigned int note_type,
+@@ -703,6 +1621,9 @@ static int ptrace_hbp_set_ctrl(unsigned int note_type,
  	struct perf_event_attr attr;
  	struct arch_hw_breakpoint_ctrl ctrl;
  
@@ -1195,7 +1184,7 @@ index dd413e3d5..c13ffd365 100644
  	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
  	if (IS_ERR(bp)) {
  		err = PTR_ERR(bp);
-@@ -727,6 +1649,9 @@ static int ptrace_hbp_set_addr(unsigned int note_type,
+@@ -727,6 +1648,9 @@ static int ptrace_hbp_set_addr(unsigned int note_type,
  	struct perf_event *bp;
  	struct perf_event_attr attr;
  
@@ -1205,7 +1194,7 @@ index dd413e3d5..c13ffd365 100644
  	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
  	if (IS_ERR(bp)) {
  		err = PTR_ERR(bp);
-@@ -1626,8 +2551,6 @@ static void tracehook_report_syscall(struct pt_regs *regs,
+@@ -1626,8 +2550,6 @@ static void tracehook_report_syscall(struct pt_regs *regs,
  
  asmlinkage int syscall_trace_enter(struct pt_regs *regs)
  {
@@ -1214,7 +1203,7 @@ index dd413e3d5..c13ffd365 100644
  	if (test_thread_flag(TIF_SYSCALL_TRACE))
  		tracehook_report_syscall(regs, PTRACE_SYSCALL_ENTER);
  
-@@ -1646,6 +2569,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+@@ -1646,6 +2568,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
  
  asmlinkage void syscall_trace_exit(struct pt_regs *regs)
  {
